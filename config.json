@@ -11,14 +11,14 @@
     "C:\\Users\\veio_\\.cache\\huggingface\\hub",
     "C:\\Users\\veio_\\Documents\\ComfyUI\\models",
     "C:\\Users\\veio_\\Documents\\ComfyUI\\custom_nodes",
-    "C:\\Users\\veio_\\.ollama\\models"
+    "C:\\Users\\veio_\\.ollama\\models",
+    "C:\\AI_Models"
   ],
   "comfyDir": "C:\\ComfyUI_windows_portable",
   "sectionOrder": [
     "Ollama",
     "ComfyUI",
-    "LM Studio",
-    "Hugging Face",
+    "LM Studio / Hugging Face",
     "Standalone"
   ],
   "activeRouterModel": "C:\\Users\\veio_\\.cache\\huggingface\\hub\\models--unsloth--Qwen3.6-27B-GGUF\\snapshots\\82d411acf4a06cfb8d9b073a5211bf410bfc29bf\\Qwen3.6-27B-UD-IQ2_XXS.gguf",

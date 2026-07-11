@@ -51,10 +51,9 @@ export default function MyModels() {
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     'Ollama': true,
     'ComfyUI': true,
-    'LM Studio': true,
-    'Hugging Face': true
+    'LM Studio / Hugging Face': true,
   });
-  const [sectionOrder, setSectionOrder] = useState<string[]>(['Ollama', 'ComfyUI', 'LM Studio', 'Hugging Face', 'Standalone']);
+  const [sectionOrder, setSectionOrder] = useState<string[]>(['Ollama', 'ComfyUI', 'LM Studio / Hugging Face', 'Standalone']);
   const [deleteModalData, setDeleteModalData] = useState<{ isOpen: boolean; models: ModelItem[]; initialAction?: 'delete' | 'decentralize' | 'centralize' | null }>({ isOpen: false, models: [], initialAction: null });
   const { showToast } = useToast();
 

@@ -156,7 +156,7 @@ let config = {
         path.join(os.homedir(), '.cache', 'huggingface', 'hub'),
     ],
     comfyDir: 'C:\\ComfyUI_windows_portable',
-    sectionOrder: ['Ollama', 'ComfyUI', 'LM Studio', 'Hugging Face', 'Standalone'],
+    sectionOrder: ['Ollama', 'ComfyUI', 'LM Studio / Hugging Face', 'Standalone'],
     activeRouterModel: null,
     vramShieldLimit: 32768
 };
@@ -173,14 +173,22 @@ const MODEL_EXTENSIONS = ['.gguf', '.safetensors', '.ckpt', '.bin', '.pt', '.pth
 
 async function scanDirectory(dir, modelsList, ollamaMap) {
     if (!fs.existsSync(dir)) return;
+    const normalizedDir = dir.toLowerCase().replace(/\\/g, '/');
+    const normalizedCentralDir = config.centralDir.toLowerCase().replace(/\\/g, '/');
     let source = 'Local';
-    const lowerDir = dir.toLowerCase();
-    if (lowerDir.includes('.ollama')) source = 'Ollama';
-    else if (lowerDir.includes('comfyui')) source = 'ComfyUI';
-    else if (lowerDir.includes('lm-studio') || lowerDir.includes('.lmstudio')) source = 'LM Studio';
-    else if (lowerDir.includes('huggingface')) source = 'Hugging Face';
-    else if (lowerDir.includes('stabilitymatrix')) source = 'Stability Matrix';
-    else if (lowerDir.includes('llama.cpp')) source = 'Llama.cpp';
+    if (normalizedDir.includes('.ollama')) source = 'Ollama';
+    else if (normalizedDir.includes('comfyui')) source = 'ComfyUI';
+    // LM Studio and Hugging Face both run via llama.cpp — group them together
+    else if (normalizedDir.includes('lm-studio') || normalizedDir.includes('.lmstudio') || normalizedDir.includes('huggingface') || normalizedDir.includes('llama.cpp')) source = 'LM Studio / Hugging Face';
+    else if (normalizedDir.includes('stabilitymatrix')) source = 'Stability Matrix';
+    // Standalone: files stored directly under the central AI_Models directory
+    // (but NOT inside the Centraliza.ai hardlink subfolder — those are duplicates)
+    else if (normalizedDir.startsWith(normalizedCentralDir)) source = 'Standalone';
+
+    // Skip the Centraliza.ai hardlink folder — its contents will appear via
+    // the original provider directory (same inode). Orphaned files that have
+    // no counterpart outside will be caught by the inode-based dedup below.
+    // REMOVED: we now scan Centraliza.ai and deduplicate by inode at the API level.
 
     try {
         const entries = await promisify(fs.readdir)(dir, { withFileTypes: true });
@@ -214,7 +222,7 @@ async function scanDirectory(dir, modelsList, ollamaMap) {
                             }
                         }
                         
-                        if (source === 'Hugging Face' && fullPath.includes('models--')) {
+                        if (fullPath.includes('models--')) {
                             const parts = fullPath.split('models--');
                             if (parts.length > 1) {
                                 const repoParts = parts[1].split(path.sep)[0].split('--');
@@ -242,6 +250,7 @@ async function scanDirectory(dir, modelsList, ollamaMap) {
                                 name: displayModelName,
                                 path: fullPath,
                                 size: actualStat.size,
+                                inode: actualStat.ino,   // used for hardlink dedup
                                 isSymlink: isCentralized,
                                 targetPath: isCentralized ? expectedDestPath : null,
                                 centralPath: expectedDestPath,
@@ -450,6 +459,7 @@ app.get('/api/models', async (req, res) => {
         for (const dir of config.scanDirectories) if (fs.existsSync(dir)) await scanDirectory(dir, modelsList, ollamaMap);
 
         const seenOllamaTags = new Set();
+        const seenInodes = new Set();   // deduplicate hardlinks by inode
         const seenPaths = new Set();
         deduped = [];
         for (const m of modelsList) {
@@ -459,6 +469,10 @@ app.get('/api/models', async (req, res) => {
             } else {
                 if (seenPaths.has(m.path)) continue;
                 seenPaths.add(m.path);
+                // If inode already seen, this is a hardlink duplicate — prefer the
+                // entry from the provider directory (scanned first), skip this one.
+                if (m.inode && seenInodes.has(m.inode)) continue;
+                if (m.inode) seenInodes.add(m.inode);
             }
 
             // --- Auto-Classificação de Capacidades ---
@@ -1740,14 +1754,29 @@ app.delete('/api/models', async (req, res) => {
                 else proc.kill('SIGKILL');
                 activeDownloads.delete(ollamaTag);
             }
-            exec(`ollama rm ${ollamaTag}`, () => {
-                cache.clear();
-                io.emit('models-updated');
-            });
+            // Wait for ollama rm to finish BEFORE responding, so the frontend
+            // sees the model gone when it immediately re-fetches.
+            await promisify(exec)(`ollama rm ${ollamaTag}`);
+            cache.clear();
+            io.emit('models-updated');
             return res.json({ success: true });
         }
         if (modelPath && fs.existsSync(modelPath)) {
-            await promisify(fs.unlink)(modelPath);
+            // Hugging Face cache uses a special structure:
+            //   hub/models--org--name/blobs/<sha>      (actual data, no extension)
+            //   hub/models--org--name/snapshots/HASH/  (may be hardlinks or copies on Windows)
+            // Deleting just the snapshot file leaves the blob behind and HF will
+            // reconstruct the link. We must remove the ENTIRE models--xxx folder.
+            const hfMatch = modelPath.match(/^(.*?models--[^/\\]+)/i);
+            if (hfMatch) {
+                const modelCacheDir = hfMatch[1];
+                logger.info(`[Delete] HF cache folder to remove: ${modelCacheDir}`);
+                fs.rmSync(modelCacheDir, { recursive: true, force: true });
+                logger.info(`[Delete] HF cache folder removed successfully`);
+            } else {
+                logger.info(`[Delete] Unlinking file: ${modelPath}`);
+                await promisify(fs.unlink)(modelPath);
+            }
             cache.clear();
             io.emit('models-updated');
             return res.json({ success: true });
@@ -1798,9 +1827,27 @@ app.get('/api/system/disk', async (req, res) => {
 app.post('/api/open-folder', (req, res) => {
     const { folderPath } = req.body;
     if (os.platform() === 'win32') {
-        const cleanPath = folderPath.replace(/\//g, '\\');
-        exec(`explorer.exe /select,"${cleanPath}"`);
-        const psFocus = `powershell.exe -Command "$path = '${path.dirname(cleanPath)}'; $wshell = New-Object -ComObject WScript.Shell; $explorer = New-Object -ComObject Shell.Application; $window = $explorer.Windows() | Where-Object { try { $_.Document.Folder.Self.Path.ToLower() -eq $path.ToLower() } catch { $false } } | Select-Object -First 1; if ($window) { $wshell.AppActivate($window.HWND) } else { $wshell.AppActivate('Explorador de Arquivos'); $wshell.AppActivate('File Explorer') }"`;
+        // Resolve symlinks so Explorer can actually navigate to the real location
+        let resolvedPath = folderPath;
+        try {
+            resolvedPath = fs.realpathSync(folderPath);
+        } catch(e) {
+            // If realpathSync fails (e.g. file deleted), fall back to dirname
+            resolvedPath = path.dirname(folderPath);
+        }
+        const cleanPath = resolvedPath.replace(/\//g, '\\');
+        // If it points to a file, open the parent folder with the file selected
+        let explorerArg;
+        try {
+            const stat = fs.statSync(cleanPath);
+            explorerArg = stat.isDirectory() ? `"${cleanPath}"` : `/select,"${cleanPath}"`;
+        } catch(e) {
+            // File doesn't exist, just open the parent
+            explorerArg = `"${path.dirname(cleanPath)}"`;
+        }
+        exec(`explorer.exe ${explorerArg}`);
+        const targetDir = (() => { try { return fs.statSync(cleanPath).isDirectory() ? cleanPath : path.dirname(cleanPath); } catch(e) { return path.dirname(cleanPath); } })();
+        const psFocus = `powershell.exe -Command "$path = '${targetDir}'; $wshell = New-Object -ComObject WScript.Shell; $explorer = New-Object -ComObject Shell.Application; $window = $explorer.Windows() | Where-Object { try { $_.Document.Folder.Self.Path.ToLower() -eq $path.ToLower() } catch { $false } } | Select-Object -First 1; if ($window) { $wshell.AppActivate($window.HWND) } else { $wshell.AppActivate('Explorador de Arquivos'); $wshell.AppActivate('File Explorer') }"`;
         setTimeout(() => { exec(psFocus); }, 1000);
     } else exec(`open -R "${folderPath}"`);
     res.json({ success: true });
